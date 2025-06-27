@@ -1,4 +1,4 @@
-Project for the IFT6760C Ai Safety class.
+Project for the IFT6760C AI Safety class.
 
 This repo contains the full code, some of the figures used in the report, as well as the tables (csv).
 
