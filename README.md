@@ -10,3 +10,5 @@ The relevant code files are :
 - MazeGen.py : the code to generate the mazes
 
 - others : code to generate the results in the report
+
+![7x7 best model success](\figures\success_7_best.png)
