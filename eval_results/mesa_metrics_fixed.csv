@@ -1,0 +1,6 @@
+model	plan_probe_hid	plan_probe_obs	map_IoU	sr_full	sr_wipe
+PPO_7x7_1p5M_cnn_128_n4_partial_recurrent_MDL1e-06	0.69	0.78	0.71	51.6	34.94
+PPO_7x7_1p5M_cnn_L2_128_n4_partial_recurrent_MDL1e-06	0.70	0.75	0.71	51.2	38.5
+PPO_7x7_1p5M_cnn_L2_128_n4_partial_recurrent	0.76	0.83	0.72	43.5	39.27
+PPO_7x7_1p5M_cnn_128_n4_partial_recurrent	0.83	0.86	0.74	36.7	29.4
+random_RPPO	0.92	0.92	0.71	35.1	25.9

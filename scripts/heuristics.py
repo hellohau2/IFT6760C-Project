@@ -1,0 +1,264 @@
+import heapq
+from collections import deque
+from typing import List, Tuple, Optional
+
+import numpy as np
+
+
+class HeuristicPolicy:
+
+    # 0:up 1:down 2:left 3:right
+    ACTION_TO_VEC: List[Tuple[int, int]] = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    VEC_TO_ACTION = {v: i for i, v in enumerate(ACTION_TO_VEC)}
+
+    @staticmethod
+    def _manhattan(a: Tuple[int, int], b: Tuple[int, int]) -> int:
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def __init__(self, heuristic_name: str = "greedy") -> None:
+        self.heuristic_name = heuristic_name.lower()
+        self.reset()
+
+    def reset(self):
+        # online state
+        self._heading: int = 0
+        self._last_pos: Optional[Tuple[int, int]] = None
+        # Pledge
+        self._pledge_mode = False
+        self._pledge_count = 0
+        self._pledge_init_heading: Optional[int] = None
+        # Trémaux
+        self._visits: Optional[np.ndarray] = None
+        # planners
+        self._plan: List[int] = []
+        # hash to detect new maze
+        self._maze_fingerprint: Optional[int] = None
+
+    def _vec_to_action(self, move: Tuple[int, int]) -> Optional[int]:
+        return self.VEC_TO_ACTION.get(move)
+
+    def _parse_obs(self, obs: np.ndarray):
+        '''
+        Extract latest walls/agent/target planes from stacked observation.
+        Works for any n_previous and with or without visited-channel.
+        '''
+        last4 = obs[-4:]
+        if np.array_equal(last4[3], last4[0]) or last4.shape[0] < 4:
+            frame = obs[-3:]
+        else:
+            frame = last4
+        walls, agent, target = frame[0] > 0.5, frame[1] > 0.5, frame[2] > 0.5
+        pos = tuple(np.argwhere(agent)[0])
+        goal = tuple(np.argwhere(target)[0])
+        return walls, pos, goal
+
+    def _neighbours(self, pos: Tuple[int, int], walls: np.ndarray):
+        H, W = walls.shape
+        r, c = pos
+        for act, (dr, dc) in enumerate(self.ACTION_TO_VEC):
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < H and 0 <= nc < W and not walls[nr, nc]:
+                yield (nr, nc), act
+
+    def _reconstruct(self, parent, start, goal):
+        actions: List[int] = []
+        cur = goal
+        while cur != start:
+            prev = parent[cur]
+            actions.append(
+                self._vec_to_action((cur[0]-prev[0], cur[1]-prev[1]))
+            )
+            cur = prev
+        actions.reverse()
+        return actions
+
+    def _bfs_plan(self, start, goal, walls):
+        q = deque([start])
+        parent = {start: None}
+        while q:
+            node = q.popleft()
+            if node == goal:
+                return self._reconstruct(parent, start, goal)
+            for nxt, _ in self._neighbours(node, walls):
+                if nxt not in parent:
+                    parent[nxt] = node
+                    q.append(nxt)
+        return []
+
+    def _a_star_plan(self, start, goal, walls):
+        g = {start: 0}
+        parent = {start: None}
+        pq = [(self._manhattan(start, goal), start)]
+        while pq:
+            _, node = heapq.heappop(pq)
+            if node == goal:
+                return self._reconstruct(parent, start, goal)
+            for nxt, _ in self._neighbours(node, walls):
+                cost = g[node] + 1
+                if nxt not in g or cost < g[nxt]:
+                    g[nxt] = cost
+                    heapq.heappush(pq, (cost + self._manhattan(nxt, goal), nxt))
+                    parent[nxt] = node
+        return []
+
+    def _random_mouse(self, pos, walls):
+        nbrs = list(self._neighbours(pos, walls))
+        if not nbrs:
+            return int(np.random.randint(4))
+        # maintain direction down corridors
+        if self._last_pos is not None:
+            move = (pos[0]-self._last_pos[0], pos[1]-self._last_pos[1])
+            head = self._vec_to_action(move)
+            back = None if head is None else (head + 2) % 4
+        else:
+            head = back = None
+        self._last_pos = pos
+        choices = [act for _, act in nbrs if act != back] or [act for _, act in nbrs]
+        return int(np.random.choice(choices))
+
+    def _wall_follower(self, pos, walls, *, right=True):
+        if self._last_pos is not None:
+            move = (pos[0]-self._last_pos[0], pos[1]-self._last_pos[1])
+            h = self._vec_to_action(move)
+            if h is not None:
+                self._heading = h
+        self._last_pos = pos
+        # R,F,L,B  /  L,F,R,B
+        order = [1, 0, 3, 2] if right else [3, 0, 1, 2]
+        for rel in order:
+            h = (self._heading + rel) % 4
+            dr, dc = self.ACTION_TO_VEC[h]
+            nr, nc = pos[0]+dr, pos[1]+dc
+            if 0 <= nr < walls.shape[0] and 0 <= nc < walls.shape[1] and not walls[nr, nc]:
+                self._heading = h
+                return h
+        # dead-end = U-turn
+        return (self._heading + 2) % 4 
+
+    def _dfs_plan(self, start, goal, walls):
+        '''
+        Return a search path generated by a DFS.
+        The path includes forward moves and the explicit back-tracks that DFS would make while exploring.
+        '''
+        visited = {start}
+        stack = [(start, iter(self._neighbours(start, walls)))]
+        actions = []
+
+        while stack:
+            node, nbr_iter = stack[-1]
+
+            # try the next child of the current node
+            for nxt, act in nbr_iter:
+                if nxt in visited:
+                    continue
+
+                # forward step
+                visited.add(nxt)
+                actions.append(act)
+
+                if nxt == goal:
+                    return actions
+
+                # go deeper
+                stack.append((nxt, iter(self._neighbours(nxt, walls))))
+                break
+            else:
+                # no unvisited children left → back-track one level
+                stack.pop()
+                if stack:
+                    prev = stack[-1][0]
+                    back_act = (self._vec_to_action(
+                        (prev[0]-node[0], prev[1]-node[1])))
+                    actions.append(back_act)
+
+        return actions
+
+    def _pledge(self, pos, goal, walls):
+        if not self._pledge_mode:
+            # try move that decreases Manhattan distance
+            best = min(
+                self._neighbours(pos, walls),
+                key=lambda t: self._manhattan(t[0], goal),
+                default=None,
+            )
+            if best is not None and self._manhattan(best[0], goal) < self._manhattan(pos, goal):
+                self._heading = best[1]
+                return best[1]
+            # start wall following
+            self._pledge_mode = True
+            self._pledge_count = 0
+            self._pledge_init_heading = self._heading
+
+        # wall-following with cumulative turn count
+        for rel in [3, 0, 1, 2]:  # L,F,R,B
+            h = (self._heading + rel) % 4
+            dr, dc = self.ACTION_TO_VEC[h]
+            nr, nc = pos[0]+dr, pos[1]+dc
+            if 0 <= nr < walls.shape[0] and 0 <= nc < walls.shape[1] and not walls[nr, nc]:
+                self._heading = h
+                self._pledge_count += (rel == 3) - (rel == 2)  # +1 for L, -1 for R
+                if self._pledge_count == 0 and h == self._pledge_init_heading:
+                    self._pledge_mode = False
+                return h
+        return int(np.random.randint(4))
+
+    def _tremaux(self, pos, walls):
+        if self._visits is None or self._visits.shape != walls.shape:
+            self._visits = np.zeros_like(walls, dtype=np.int32)
+        self._visits[pos] += 1
+        best = min(
+            self._neighbours(pos, walls),
+            key=lambda t: self._visits[t[0]],
+            default=None,
+        )
+        return best[1] if best else int(np.random.randint(4))
+
+    def _greedy(self, pos, goal, walls):
+        best = min(
+            self._neighbours(pos, walls),
+            key=lambda t: self._manhattan(t[0], goal),
+            default=None,
+        )
+        return best[1] if best else int(np.random.randint(4))
+
+    def predict(self, obs, deterministic: bool = True):
+        walls, pos, goal = self._parse_obs(obs)
+
+        fingerprint = hash(walls.tobytes())
+        if fingerprint != self._maze_fingerprint:
+            self.reset()
+            self._maze_fingerprint = fingerprint
+            walls, pos, goal = self._parse_obs(obs)
+
+        name = self.heuristic_name
+
+        if name in {"bfs", "dijkstra", "dfs", "a_star"}:
+            if not self._plan:
+                if name == "a_star":
+                    self._plan = self._a_star_plan(pos, goal, walls)
+                elif name == "dfs":
+                    self._plan = self._dfs_plan(pos, goal, walls)
+                elif name in {"bfs", "dijkstra"}:
+                    self._plan = self._bfs_plan(pos, goal, walls)
+
+            action = self._plan.pop(0) if self._plan else int(np.random.randint(4))
+            return int(action), None
+
+        if name in {"random", "random_mouse"}:
+            action = self._random_mouse(pos, walls)
+        elif name == "uniform":
+            action = int(np.random.randint(4))
+        elif name in {"hand", "right_hand"}:
+            action = self._wall_follower(pos, walls, right=True)
+        elif name == "left_hand":
+            action = self._wall_follower(pos, walls, right=False)
+        elif name == "pledge":
+            action = self._pledge(pos, goal, walls)
+        elif name == "tremaux":
+            action = self._tremaux(pos, walls)
+        elif name == "greedy":
+            action = self._greedy(pos, goal, walls)
+        else: 
+            action = int(np.random.randint(4))
+
+        return int(action), None
